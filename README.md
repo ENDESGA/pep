@@ -119,10 +119,11 @@ pep_decompress() parameters:
 	pep*       IN_PEP                  = pep struct-pointer to decompress
 	pep_format OUT_FORMAT              = channel-byte-order of the new pixels: pep_rgba, pep_bgra, pep_argb, or pep_abgr
 	uint8_t    FIRST_COLOR_TRANSPARENT = 0 or 1 to make the first color have 0 Alpha
+	uint8_t    PRE_MULTIPLY            = 0 or 1 to make the RGB channels pre-multiplied with A
 returns:
 	a uint32_t* with the uncompressed pixel data
 */
-uint32_t* pixels = pep_decompress( IN_PEP, OUT_FORMAT, FIRST_COLOR_TRANSPARENT );
+uint32_t* pixels = pep_decompress( IN_PEP, OUT_FORMAT, FIRST_COLOR_TRANSPARENT, PRE_MULTIPLY );
 
 /*
 pep_free() parameters:
