@@ -35,7 +35,7 @@
 
 #define PEP_VERSION_MAJOR 0
 #define PEP_VERSION_MINOR 5
-#define PEP_VERSION_PATCH 0
+#define PEP_VERSION_PATCH 1
 #define PEP_VERSION _PEP_STRINGIFY( PEP_VERSION_MAJOR ) "." _PEP_STRINGIFY( PEP_VERSION_MINOR ) "." _PEP_STRINGIFY( PEP_VERSION_PATCH )
 
 ////////////////////////////////
@@ -219,9 +219,10 @@ static inline uint32_t _pep_arith_decode_curr_freq( _pep_ac_decode* const ac, co
 static inline void _pep_arith_decode_update( _pep_ac_decode* const ac, const _pep_prob prob );
 static inline _pep_sym_decode _pep_get_sym_from_freq( const _pep_context* const ctx, const uint32_t target_freq );
 
+static inline uint32_t _pep_pre_multiply( const uint32_t pixel, const pep_format format );
 static inline uint32_t _pep_reformat( const uint32_t in_color, const pep_format in_format, const pep_format out_format );
 static inline pep pep_compress( const uint32_t* in_pixels, const uint16_t width, const uint16_t height, const pep_format in_format, const pep_channel_bits in_channel_bits );
-static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, const uint8_t first_color_transparent );
+static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, const uint8_t first_color_transparent, uint8_t const pre_multiply );
 static inline void pep_free( pep* in_pep );
 
 static inline uint8_t* pep_serialize( const pep* in_pep, uint32_t* const out_size );
@@ -343,6 +344,29 @@ static inline _pep_sym_decode _pep_get_sym_from_freq( const _pep_context* const 
 	result.symbol = s;
 
 	return result;
+}
+
+// pep supports pre-multiplying the RGB channels with the A channel.
+static inline uint32_t _pep_pre_multiply( const uint32_t pixel, const pep_format format )
+{
+	uint8_t* bytes = ( uint8_t* )( &pixel );
+
+	if( format <= pep_bgra )
+	{
+		uint32_t scaled_a = ( uint32_t )( bytes[ 3 ] ) * 257;
+		bytes[ 1 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 1 ] ) * scaled_a + 32896 ) >> 16 );
+		bytes[ 2 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 2 ] ) * scaled_a + 32896 ) >> 16 );
+		bytes[ 3 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 3 ] ) * scaled_a + 32896 ) >> 16 );
+	}
+	else
+	{
+		uint32_t scaled_a = ( uint32_t )( bytes[ 0 ] ) * 257;
+		bytes[ 0 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 0 ] ) * scaled_a + 32896 ) >> 16 );
+		bytes[ 1 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 1 ] ) * scaled_a + 32896 ) >> 16 );
+		bytes[ 2 ] = ( uint8_t )( ( ( uint32_t )( bytes[ 2 ] ) * scaled_a + 32896 ) >> 16 );
+	}
+
+	return pixel;
 }
 
 // pep supports "dynamic formats", where you can specify what the in-bytes are,
@@ -532,7 +556,7 @@ static inline pep pep_compress( const uint32_t* in_pixels, const uint16_t width,
 // do it for you via in_pep->format.
 // If you want the first color to be 0 alpha, set transparent_first_color to 1
 // otherwise just make it 0
-static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, const uint8_t transparent_first_color )
+static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, const uint8_t transparent_first_color, uint8_t const pre_multiply )
 {
 	if( in_pep == NULL ) return NULL;
 	if( in_pep->bytes == NULL || in_pep->bytes_size == 0 || in_pep->width == 0 || in_pep->height == 0 ) return NULL;
@@ -644,7 +668,12 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 			while( indices_in_byte < indices_per_byte && canvas_pos < area )
 			{
 				const uint8_t palette_idx = ( decode_result.symbol >> ( indices_in_byte * bits_per_index ) ) & index_mask;
-				out_pixels[ canvas_pos ] = _pep_reformat( palette[ palette_idx ], in_pep->format, out_format );
+				uint32_t pixel = _pep_reformat( palette[ palette_idx ], in_pep->format, out_format );
+				if( pre_multiply != 0 )
+				{
+					pixel = _pep_pre_multiply( pixel, out_format );
+				}
+				out_pixels[ canvas_pos ] = pixel;
 				++canvas_pos;
 				++indices_in_byte;
 			}
@@ -653,7 +682,12 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 		{
 			if( canvas_pos < area )
 			{
-				out_pixels[ canvas_pos ] = _pep_reformat( palette[ decode_result.symbol ], in_pep->format, out_format );
+				uint32_t pixel = _pep_reformat( palette[ decode_result.symbol ], in_pep->format, out_format );
+				if( pre_multiply != 0 )
+				{
+					pixel = _pep_pre_multiply( pixel, out_format );
+				}
+				out_pixels[ canvas_pos ] = pixel;
 				++canvas_pos;
 			}
 		}
