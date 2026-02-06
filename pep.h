@@ -594,11 +594,11 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 	{
 		if( in_pep->format <= pep_bgra )
 		{
-			palette[ 0 ] = palette[ 0 ] & 0xffffff00;
+			palette[ 0 ] = palette[ 0 ] & 0x00ffffff;
 		}
 		else
 		{
-			palette[ 0 ] = palette[ 0 ] & 0x00ffffff;
+			palette[ 0 ] = palette[ 0 ] & 0xffffff00;
 		}
 	}
 
@@ -931,9 +931,8 @@ static inline pep pep_deserialize( const uint8_t* const in_bytes )
 	if( is_bitmap )
 	{
 		out_pep.palette_size = 2;
+		out_pep.palette[ 0 ] = out_pep.format <= pep_bgra ? 0xff000000 : 0x000000ff;
 		out_pep.palette[ 1 ] = 0xffffffff;
-		out_pep.palette[ 0 ] = 0;
-		( ( uint8_t* )( &out_pep.palette[ 0 ] ) )[ out_pep.format <= pep_bgra ? 3 : 0 ] = 255;
 	}
 	else
 	{
