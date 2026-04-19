@@ -226,7 +226,7 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 static inline void pep_free( pep* in_pep );
 
 static inline uint8_t* pep_serialize( const pep* in_pep, uint32_t* const out_size );
-static inline pep pep_deserialize( const uint8_t* const in_bytes );
+static inline pep pep_deserialize( const uint8_t* const in_bytes, const uint32_t in_bytes_size );
 
 static inline uint8_t pep_save( const pep* const in_pep, const char* const file_path );
 static inline pep pep_load( const char* const file_path );
@@ -337,6 +337,7 @@ static inline _pep_sym_decode _pep_get_sym_from_freq( const _pep_context* const 
 		freq += ctx->freq[ s ];
 		if( freq > target_freq ) break;
 	}
+	if( s > PEP_FREQ_END ) s = PEP_FREQ_END;
 
 	result.prob.high = freq;
 	result.prob.low = freq - ctx->freq[ s ];
@@ -587,7 +588,8 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 	uint16_t freq_max = PEP_FREQ_MAX;
 
 	static uint32_t palette[ 256 ];
-	memcpy( palette, in_pep->palette, in_pep->palette_size * sizeof( uint32_t ) );
+	const uint16_t palette_count = in_pep->palette_size ? in_pep->palette_size : 256;
+	memcpy( palette, in_pep->palette, palette_count * sizeof( uint32_t ) );
 	const uint64_t packed_indices_size = area / indices_per_byte;
 
 	if( transparent_first_color != 0 )
@@ -668,7 +670,7 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 			while( indices_in_byte < indices_per_byte && canvas_pos < area )
 			{
 				const uint8_t palette_idx = ( decode_result.symbol >> ( indices_in_byte * bits_per_index ) ) & index_mask;
-				uint32_t pixel = _pep_reformat( palette[ palette_idx ], in_pep->format, out_format );
+				uint32_t pixel = ( palette_idx < palette_count ) ? _pep_reformat( palette[ palette_idx ], in_pep->format, out_format ) : 0;
 				if( pre_multiply != 0 )
 				{
 					pixel = _pep_pre_multiply( pixel, out_format );
@@ -680,7 +682,7 @@ static inline uint32_t* pep_decompress( const pep* const in_pep, const pep_forma
 		}
 		else
 		{
-			if( canvas_pos < area )
+			if( canvas_pos < area && decode_result.symbol < palette_count )
 			{
 				uint32_t pixel = _pep_reformat( palette[ decode_result.symbol ], in_pep->format, out_format );
 				if( pre_multiply != 0 )
@@ -880,15 +882,17 @@ static inline uint8_t* pep_serialize( const pep* in_pep, uint32_t* const out_siz
 	return out_bytes;
 }
 
-static inline pep pep_deserialize( const uint8_t* const in_bytes )
+static inline pep pep_deserialize( const uint8_t* const in_bytes, const uint32_t in_bytes_size )
 {
 	pep out_pep = { 0 };
 
-	if( !in_bytes ) return out_pep;
+	if( !in_bytes || in_bytes_size == 0 ) return out_pep;
 
 	const uint8_t* bytes_ref = in_bytes;
+	const uint8_t* const bytes_end = in_bytes + in_bytes_size;
 
 	// packed flags
+	if( bytes_ref + 1 > bytes_end ) return out_pep;
 	uint8_t packed_flags = *bytes_ref++;
 	out_pep.format = ( pep_format )( packed_flags & 0x3 );
 	out_pep.channel_bits = ( pep_channel_bits )( ( packed_flags >> 2 ) & 0x3 );
@@ -897,6 +901,8 @@ static inline pep pep_deserialize( const uint8_t* const in_bytes )
 	uint8_t is_bitmap = ( packed_flags >> 6 ) & 0x1;
 
 	// width/height
+	uint8_t dim_bytes = is_small ? 2 : 3;
+	if( bytes_ref + dim_bytes > bytes_end ) return out_pep;
 	uint16_t w, h;
 	if( is_small )
 	{
@@ -920,16 +926,21 @@ static inline pep pep_deserialize( const uint8_t* const in_bytes )
 	uint8_t byte_val;
 	do
 	{
+		if( bytes_ref >= bytes_end ) return out_pep;
 		byte_val = *bytes_ref++;
-		bytes_size |= ( ( uint32_t )( byte_val & 0x7f ) ) << shift;
+		if( shift < 32 ) bytes_size |= ( ( uint32_t )( byte_val & 0x7f ) ) << shift;
 		shift += 7;
 	}
-	while( byte_val & 0x80 );
+	while( ( byte_val & 0x80 ) && shift < 35 );
 	out_pep.bytes_size = bytes_size;
 
 	// handle bitmap or read palette
+	uint32_t remaining = ( uint32_t )( bytes_end - bytes_ref );
+
 	if( is_bitmap )
 	{
+		if( remaining < bytes_size ) return out_pep;
+
 		out_pep.palette_size = 2;
 		out_pep.palette[ 0 ] = out_pep.format <= pep_bgra ? 0xff000000 : 0x000000ff;
 		out_pep.palette[ 1 ] = 0xffffffff;
@@ -937,12 +948,27 @@ static inline pep pep_deserialize( const uint8_t* const in_bytes )
 	else
 	{
 		// palette size
+		if( remaining < 1 ) return out_pep;
 		out_pep.palette_size = *bytes_ref++;
+		remaining--;
+
 		uint16_t palette_count = out_pep.palette_size ? out_pep.palette_size : 256;
 
 		// palette
 		const uint8_t channel_bits = 1 << out_pep.channel_bits;
 		const uint8_t mask = ( 1 << channel_bits ) - 1;
+		uint32_t palette_bytes;
+		if( channel_bits == 8 )
+		{
+			palette_bytes = palette_count * ( only_rgb ? 3 : 4 );
+		}
+		else
+		{
+			uint16_t channels = only_rgb ? 3 : 4;
+			palette_bytes = ( channel_bits * channels * palette_count + 7 ) >> 3;
+		}
+
+		if( remaining < palette_bytes || remaining - palette_bytes < bytes_size ) return out_pep;
 
 		if( channel_bits == 8 )
 		{
@@ -1083,7 +1109,7 @@ static inline pep pep_load( const char* const file_path )
 		return out_pep;
 	}
 
-	out_pep = pep_deserialize( bytes );
+	out_pep = pep_deserialize( bytes, ( uint32_t )read );
 	PEP_FREE( bytes );
 
 	#ifdef PEP_DEBUG
