@@ -211,6 +211,7 @@ typedef struct
 	uint32_t low;
 	uint32_t range;
 	uint32_t code;
+	uint8_t overrun; // set once a read runs past end_of_data
 }
 _pep_ac_decode;
 
@@ -360,6 +361,8 @@ static void _pep_arith_encode_normalize( _pep_ac_encode* const ac )
 static uint32_t _pep_arith_decode_curr_freq( _pep_ac_decode* const ac, const uint32_t scale )
 {
 	ac->range /= scale;
+	// A corrupt stream can leave less range than scale, report a frequency past the end so the caller rejects it instead of dividing by zero.
+	if( ac->range == 0 ) return UINT32_MAX;
 	uint32_t result = ( ac->code - ac->low ) / ( ac->range );
 	return result;
 }
@@ -385,6 +388,10 @@ static void _pep_arith_decode_update( _pep_ac_decode* const ac, const _pep_prob 
 		if( ac->data_ref != ac->end_of_data )
 		{
 			in_byte = *ac->data_ref++;
+		}
+		else
+		{
+			ac->overrun = 1;
 		}
 
 		ac->code = ( ac->code << 8 ) | in_byte;
@@ -780,10 +787,12 @@ pep pep_compress( const uint32_t* in_pixels, const uint16_t width, const uint16_
 }
 
 // Decode all pixels with one model (mirror of _pep_encode_model).
-static void _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16_t width, uint16_t height, uint32_t pcount, uint8_t model, const uint32_t* palette, pep_format in_format, pep_format out_format, uint8_t pre_multiply, uint8_t* idx, uint32_t* out_pixels )
+// Running out of data or leaving bytes over means a corrupt stream, or dimensions that don't match it
+// Returns 0 on failure, 1 on success
+static uint8_t _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16_t width, uint16_t height, uint32_t pcount, uint8_t model, const uint32_t* palette, pep_format in_format, pep_format out_format, uint8_t pre_multiply, uint8_t* idx, uint32_t* out_pixels )
 {
 	_pep_model_context m;
-	if( !_pep_model_init( &m, _pep_models[ model ], pcount ) ) return;
+	if( !_pep_model_init( &m, _pep_models[ model ], pcount ) ) return 0;
 	const uint32_t index_escape = m.index_escape;
 
 	_pep_ac_decode ac = { 0 };
@@ -794,6 +803,7 @@ static void _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16
 	{
 		uint8_t b = 0;
 		if( ac.data_ref != ac.end_of_data ) b = *ac.data_ref++;
+		else ac.overrun = 1;
 		ac.code = ( ac.code << 8 ) | b;
 	}
 
@@ -813,6 +823,12 @@ static void _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16
 			{
 				uint32_t f = _pep_arith_decode_curr_freq( &ac, context->sum );
 				_pep_sym_decode r = _pep_get_sym_from_freq( context, f );
+				// No symbol covers f only in a corrupt stream (e.g. wrong dimensions), and its empty interval would shrink the range to 0 and hang the decoder.
+				if( f >= r.prob.high || ac.overrun )
+				{
+					_pep_model_free( &m );
+					return 0;
+				}
 				_pep_arith_decode_update( &ac, r.prob );
 
 				if( r.symbol != index_escape )
@@ -832,6 +848,11 @@ static void _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16
 			{
 				uint32_t f = _pep_arith_decode_curr_freq( &ac, order0->sum );
 				_pep_sym_decode r = _pep_get_sym_from_freq( order0, f );
+				if( f >= r.prob.high || ac.overrun )
+				{
+					_pep_model_free( &m );
+					return 0;
+				}
 				_pep_arith_decode_update( &ac, r.prob );
 				symbol = r.symbol;
 				_PEP_UPDATE( order0, symbol, freq_max, pcount );
@@ -852,6 +873,7 @@ static void _pep_decode_model( const uint8_t* in_bytes, uint64_t in_size, uint16
 		}
 	}
 	_pep_model_free( &m );
+	return ( !ac.overrun && ac.data_ref == ac.end_of_data ) ? 1 : 0;
 }
 
 uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, const uint8_t transparent_first_color, uint8_t const pre_multiply )
@@ -864,6 +886,12 @@ uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, 
 	const uint32_t area = ( uint32_t )width * height;
 	uint32_t* out_pixels = ( uint32_t* )PEP_MALLOC( area * sizeof( uint32_t ) );
 	uint8_t* idx = ( uint8_t* )PEP_MALLOC( area );
+	if( out_pixels == NULL || idx == NULL )
+	{
+		PEP_FREE( out_pixels );
+		PEP_FREE( idx );
+		return NULL;
+	}
 
 	const uint32_t pcount = in_pep->palette_size ? in_pep->palette_size : 256;
 	static uint32_t palette[ 256 ];
@@ -877,9 +905,14 @@ uint32_t* pep_decompress( const pep* const in_pep, const pep_format out_format, 
 	uint8_t model = in_pep->model;
 	if( model >= PEP_NUM_MODELS ) model = 0;
 
-	_pep_decode_model( in_pep->bytes, in_pep->bytes_size, width, height, pcount, model, palette, in_pep->format, out_format, pre_multiply, idx, out_pixels );
+	const uint8_t decoded = _pep_decode_model( in_pep->bytes, in_pep->bytes_size, width, height, pcount, model, palette, in_pep->format, out_format, pre_multiply, idx, out_pixels );
 
 	PEP_FREE( idx );
+	if( !decoded )
+	{
+		PEP_FREE( out_pixels );
+		return NULL;
+	}
 	return out_pixels;
 }
 
